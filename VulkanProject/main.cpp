@@ -1,5 +1,8 @@
+#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -8,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <set>
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -47,9 +51,10 @@ class HelloTriangleApplication {
 public:
 	struct QueueFamilyIndices {
 		std::optional<uint32_t> graphicsFamily;
+		std::optional<uint32_t> presentFamily;
 
 		bool isComplete() {
-			return graphicsFamily.has_value();
+			return graphicsFamily.has_value() && presentFamily.has_value();
 		}
 	};
 
@@ -64,9 +69,11 @@ private:
 	GLFWwindow* window;
 	VkInstance instance;
 	VkDebugUtilsMessengerEXT debugMessenger;
+	VkSurfaceKHR surface;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	VkDevice device;
 	VkQueue graphicsQueue;
+	VkQueue presentQueue;
 
 	void initWindow() {
 		glfwInit();
@@ -84,6 +91,7 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugMessenger();
+		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
 	}
@@ -91,19 +99,24 @@ private:
 	void createLogicalDevice() {
 		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
-		VkDeviceQueueCreateInfo queueCreateInfo{};
-		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-		queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
-		queueCreateInfo.queueCount = 1;
-		
+		std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+		std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
+
 		float queuePriority = 1.0f;
-		queueCreateInfo.pQueuePriorities = &queuePriority;
+		for (uint32_t queueFamily : uniqueQueueFamilies) {
+			VkDeviceQueueCreateInfo queueCreateInfo{};
+			queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+			queueCreateInfo.queueFamilyIndex = queueFamily;
+			queueCreateInfo.queueCount = 1;
+			queueCreateInfo.pQueuePriorities = &queuePriority;
+			queueCreateInfos.push_back(queueCreateInfo);
+		}
 
 		VkPhysicalDeviceFeatures deviceFeatures{};
 		VkDeviceCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.queueCreateInfoCount = 1;
+		createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+		createInfo.pQueueCreateInfos = queueCreateInfos.data();
 		createInfo.pEnabledFeatures = &deviceFeatures;
 
 		// Compatibility, ignored on newer Vulkan versions
@@ -198,6 +211,13 @@ private:
 				indices.graphicsFamily = i;
 			}
 
+			VkBool32 presentSupport = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+			
+			if (presentSupport) {
+				indices.presentFamily = i;
+			}
+
 			if (indices.isComplete()) {
 				break;
 			}
@@ -225,7 +245,7 @@ private:
 
 	void setupDebugMessenger() {
 		if (!enableValidationLayers) return;
-		
+
 		VkDebugUtilsMessengerCreateInfoEXT createInfo;
 		populateDebugMessengerCreateInfo(createInfo);
 		if (CreateDebugUtilsMessengerEXT(instance, &createInfo, nullptr, &debugMessenger) != VK_SUCCESS) {
@@ -245,6 +265,7 @@ private:
 		}
 
 		vkDestroyDevice(device, nullptr);
+		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 
 		glfwDestroyWindow(window);
@@ -283,7 +304,7 @@ private:
 
 			populateDebugMessengerCreateInfo(debugCreateInfo);
 			createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
-		} 
+		}
 		else {
 			createInfo.enabledLayerCount = 0;
 			createInfo.pNext = nullptr;
@@ -296,108 +317,114 @@ private:
 		}
 	}
 
+	void createSurface() {
+		if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create window surface!");
+		}
+	}
 
-		void checkExtensionSupport(uint32_t glfwExtensionCount, const char** glfwExtensions) {
-			uint32_t extensionCount = 0;
-			vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
 
-			std::vector<VkExtensionProperties> extensions(extensionCount);
-			vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+	void checkExtensionSupport(uint32_t glfwExtensionCount, const char** glfwExtensions) {
+		uint32_t extensionCount = 0;
+		vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
 
-			std::cout << "Available extensions:\n";
+		std::vector<VkExtensionProperties> extensions(extensionCount);
+		vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
 
-			for (const auto& extension : extensions) {
-				std::cout << '\t' << extension.extensionName << '\n';
-			}
+		std::cout << "Available extensions:\n";
 
-			verifyGLFWVulkanExtensionSupport(extensions, glfwExtensionCount, glfwExtensions);
+		for (const auto& extension : extensions) {
+			std::cout << '\t' << extension.extensionName << '\n';
 		}
 
-		void verifyGLFWVulkanExtensionSupport(std::vector<VkExtensionProperties> vkExtensions, uint32_t glfwExtensionCount, const char** glfwExtensions) {
-			int found = 0;
-			for (const auto& vkExtension : vkExtensions) {
-				const char* vkExtensionName = vkExtension.extensionName;
-				for (int i = 0; i < glfwExtensionCount; ++i) {
-					if (strcmp(vkExtensionName, glfwExtensions[i]) == 0) {
-						found++;
-					}
-				}
+		verifyGLFWVulkanExtensionSupport(extensions, glfwExtensionCount, glfwExtensions);
+	}
 
-				if (found == glfwExtensionCount)
+	void verifyGLFWVulkanExtensionSupport(std::vector<VkExtensionProperties> vkExtensions, uint32_t glfwExtensionCount, const char** glfwExtensions) {
+		int found = 0;
+		for (const auto& vkExtension : vkExtensions) {
+			const char* vkExtensionName = vkExtension.extensionName;
+			for (int i = 0; i < glfwExtensionCount; ++i) {
+				if (strcmp(vkExtensionName, glfwExtensions[i]) == 0) {
+					found++;
+				}
+			}
+
+			if (found == glfwExtensionCount)
+				break;
+		}
+
+		if (found != glfwExtensionCount) {
+			throw std::runtime_error("Not all glfwExtensions are not supported by Vulkan");
+		}
+		else {
+			std::cout << "All glfwExtensions are supported by Vulkan!" << std::endl;
+		}
+	}
+
+	bool checkValidationLayerSupport() {
+		uint32_t layerCount;
+		vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+
+		std::vector<VkLayerProperties> availableLayers(layerCount);
+		vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+
+		for (const char* layerName : validationLayers) {
+			bool layerFound = false;
+
+			for (const auto& layerProperties : availableLayers) {
+				if (strcmp(layerName, layerProperties.layerName) == 0) {
+					layerFound = true;
 					break;
-			}
-
-			if (found != glfwExtensionCount) {
-				throw std::runtime_error("Not all glfwExtensions are not supported by Vulkan");
-			}
-			else {
-				std::cout << "All glfwExtensions are supported by Vulkan!" << std::endl;
-			}
-		}
-
-		bool checkValidationLayerSupport() {
-			uint32_t layerCount;
-			vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
-
-			std::vector<VkLayerProperties> availableLayers(layerCount);
-			vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
-
-			for (const char* layerName : validationLayers) {
-				bool layerFound = false;
-
-				for (const auto& layerProperties : availableLayers) {
-					if (strcmp(layerName, layerProperties.layerName) == 0) {
-						layerFound = true;
-						break;
-					}
-				}
-
-				if (!layerFound) {
-					return false;
 				}
 			}
 
-			return true;
-		}
-
-		std::vector<const char*> getRequiredExtensions() {
-			uint32_t glfwExtensionCount = 0;
-			const char** glfwExtensions;
-			glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-			std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-
-			if (enableValidationLayers) {
-				extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+			if (!layerFound) {
+				return false;
 			}
-
-			return extensions;
 		}
 
-		static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-			VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-			VkDebugUtilsMessageTypeFlagsEXT messageType,
-			const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-			void* pUserData) {
-			/*
-			* VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: Diagnostic message
-			* VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: Informational message like the creation of a resource
-			* VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: Message about behavior that is not necessarily an error, but very likely a bug in your application
-			* VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: Message about behavior that is invalid and may cause crashes
-			* 
-			* VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: Some event has happened that is unrelated to the specification or performance
-			* VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: Something has happened that violates the specification or indicates a possible mistake
-			* VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: Potential non-optimal use of Vulkan
-			*/
+		return true;
+	}
 
-			if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+	std::vector<const char*> getRequiredExtensions() {
+		uint32_t glfwExtensionCount = 0;
+		const char** glfwExtensions;
+		glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
-			}
+		std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
-			std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
-
-			return VK_FALSE;
+		if (enableValidationLayers) {
+			extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		}
+
+		return extensions;
+	}
+
+	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+		VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+		VkDebugUtilsMessageTypeFlagsEXT messageType,
+		const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+		void* pUserData) {
+		/*
+		* VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: Diagnostic message
+		* VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: Informational message like the creation of a resource
+		* VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: Message about behavior that is not necessarily an error, but very likely a bug in your application
+		* VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: Message about behavior that is invalid and may cause crashes
+		* 
+		* VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: Some event has happened that is unrelated to the specification or performance
+		* VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: Something has happened that violates the specification or indicates a possible mistake
+		* VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: Potential non-optimal use of Vulkan
+		*/
+
+		if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+
+		}
+
+		std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
+
+		return VK_FALSE;
+	}
 };
 
 int main() {
